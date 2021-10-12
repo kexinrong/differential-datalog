@@ -415,7 +415,11 @@ public final class DDlogJooqProvider implements MockDataProvider {
                     // Is a statement with bound variables
                     for (int i = 0; i < rowElements.length; i++) {
                         Field<?> fi = fields.get(i);
-                        final boolean isNullableField = fi.getDataType().nullable();
+                        // TODO: arrays, whose fields have type "Object", are always not-null
+                        boolean isNullableField = fi.getDataType().nullable();
+                        if (fi.getDataType().getSQLType() == Types.OTHER) {
+                            isNullableField = false;
+                        }
                         final DDlogRecord record = toValue(fi, context.nextBinding());
                         recordsArray[i] = maybeOption(isNullableField, record, fi.getName());
                     }
@@ -423,7 +427,10 @@ public final class DDlogJooqProvider implements MockDataProvider {
                     // need to parse literals into DDLogRecords
                     for (int i = 0; i < rowElements.length; i++) {
                         Field<?> fi = fields.get(i);
-                        final boolean isNullableField = fi.getDataType().nullable();
+                        boolean isNullableField = fi.getDataType().nullable();
+                        if (fi.getDataType().getSQLType() == Types.OTHER) {
+                            isNullableField = false;
+                        }
                         final DDlogRecord result = rowElements[i].accept(PARSE_LITERALS);
                         recordsArray[i] = maybeOption(isNullableField, result, fi.getName());
                     }
@@ -676,6 +683,21 @@ public final class DDlogJooqProvider implements MockDataProvider {
                 } catch (final DDlogException e) {
                     throw new DDlogJooqProviderException("Could not create String DDlogRecord for object: " + in);
                 }
+            case Types.OTHER: {
+                // then we have an array lol.
+                // Translate this into a DDlog vector
+                // in is an array
+                try {
+                    Object[] ary = (Object[]) in;
+                    DDlogRecord[] ddlogVectorItems = new DDlogRecord[ary.length];
+                    for (int i = 0; i < ary.length; i++) {
+                        ddlogVectorItems[i] = new DDlogRecord((String) ary[i]);
+                    }
+                    return DDlogRecord.makeVector(ddlogVectorItems);
+                } catch (final DDlogException e) {
+                    throw new DDlogJooqProviderException("Could not create Vector DDlogRecord for object: " + in);
+                }
+            }
             default:
                 throw new DDlogJooqProviderException("Unknown datatype " + field);
         }

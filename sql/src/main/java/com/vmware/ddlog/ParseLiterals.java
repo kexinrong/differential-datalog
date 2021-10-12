@@ -26,13 +26,29 @@ package com.vmware.ddlog;
 
 import ddlogapi.DDlogException;
 import ddlogapi.DDlogRecord;
+import org.apache.calcite.sql.SqlBasicCall;
+import org.apache.calcite.sql.SqlCall;
 import org.apache.calcite.sql.SqlLiteral;
+import org.apache.calcite.sql.SqlNode;
 import org.apache.calcite.sql.util.SqlBasicVisitor;
 
 /*
  * Translates literals into corresponding DDlogRecord instances
  */
 class ParseLiterals extends SqlBasicVisitor<DDlogRecord> {
+    @Override
+    public DDlogRecord visit(final SqlCall sqlCall) {
+        SqlNode[] arrayElements = ((SqlBasicCall) sqlCall).getOperands();
+        DDlogRecord[] items = new DDlogRecord[arrayElements.length];
+        for (int i = 0; i < items.length; i++) {
+            items[i] = arrayElements[i].accept(this);
+        }
+        try {
+            return DDlogRecord.makeVector(items);
+        } catch (final DDlogException e) {
+            throw new RuntimeException(e);
+        }
+    }
     @Override
     public DDlogRecord visit(final SqlLiteral sqlLiteral) {
         switch (sqlLiteral.getTypeName()) {
