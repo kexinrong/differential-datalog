@@ -1176,7 +1176,7 @@ class TranslationVisitor extends AstVisitor<DDlogIRNode, TranslationContext> {
 
         Set<String> joinColumns = new HashSet<String>();
         switch (join.getType()) {
-            /*
+
             case FULL:
                 leftJoin = true;
                 // fall through
@@ -1185,7 +1185,7 @@ class TranslationVisitor extends AstVisitor<DDlogIRNode, TranslationContext> {
                 // fall through
             case LEFT:
                 // fall through
-              */
+
             case INNER:
                 if (join.getType() == LEFT)
                     leftJoin = true;
