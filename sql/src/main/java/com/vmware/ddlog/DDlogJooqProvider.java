@@ -44,6 +44,7 @@ import java.sql.SQLException;
 import java.sql.Types;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.ReentrantLock;
 
 import static org.jooq.impl.DSL.field;
 
@@ -111,6 +112,7 @@ public final class DDlogJooqProvider implements MockDataProvider {
     private final Set<String> inputTableNames = new HashSet<>();
     private final DDlogJooqHelper whereHelper;
     public static boolean trace = false;
+    public final Object lock = new Object();
 
     public DDlogJooqProvider(final DDlogAPI dDlogAPI, final List<H2SqlStatement> sqlStatements) {
         this.dDlogAPI = dDlogAPI;
@@ -164,33 +166,35 @@ public final class DDlogJooqProvider implements MockDataProvider {
         final String[] batchSql = ctx.batchSQL();
         final MockResult[] mock = new MockResult[batchSql.length];
         int commandIndex = 0;
-        try {
-            if (trace)
-                System.out.println("Staring transaction: " + ctx.sql());
-            dDlogAPI.transactionStart();
-            if (trace)
-                System.out.println("Transaction started");
-            final Object[][] bindings = ctx.batchBindings();
-            for (commandIndex = 0; commandIndex < batchSql.length; commandIndex++) {
-                final Object[] binding = bindings != null && bindings.length > commandIndex ? bindings[commandIndex] : DEFAULT_BINDING;
-                final QueryContext context = new QueryContext(batchSql[commandIndex], binding);
-                final SqlParser parser = SqlParser.create(batchSql[commandIndex]);
-                final SqlNode sqlNode = parser.parseStmt();
-                mock[commandIndex] = sqlNode.accept(new QueryVisitor(context));
+        synchronized(lock) {
+            try {
+                if (trace)
+                    System.out.println("Staring transaction: " + ctx.sql());
+                dDlogAPI.transactionStart();
+                if (trace)
+                    System.out.println("Transaction started");
+                final Object[][] bindings = ctx.batchBindings();
+                for (commandIndex = 0; commandIndex < batchSql.length; commandIndex++) {
+                    final Object[] binding = bindings != null && bindings.length > commandIndex ? bindings[commandIndex] : DEFAULT_BINDING;
+                    final QueryContext context = new QueryContext(batchSql[commandIndex], binding);
+                    final SqlParser parser = SqlParser.create(batchSql[commandIndex]);
+                    final SqlNode sqlNode = parser.parseStmt();
+                    mock[commandIndex] = sqlNode.accept(new QueryVisitor(context));
+                }
+                dDlogAPI.transactionCommitDumpChanges(this::onChange);
+                if (trace)
+                    System.out.println("Transaction committed");
+            } catch (final Exception e) {
+                // We really have to catch all exceptions here to rollback, otherwise
+                // we could be left with a started and unterminated transaction.
+                if (trace)
+                    System.out.println("Exception: " + e.getMessage());
+                rollback();
+                // Not clear that this is the result for all remaining commands,
+                // but we cannot leave these null either.
+                for (; commandIndex < batchSql.length; commandIndex++)
+                    mock[commandIndex] = exception(e);
             }
-            dDlogAPI.transactionCommitDumpChanges(this::onChange);
-            if (trace)
-                System.out.println("Transaction committed");
-        } catch (final Exception e) {
-            // We really have to catch all exceptions here to rollback, otherwise
-            // we could be left with a started and unterminated transaction.
-            if (trace)
-                System.out.println("Exception: " + e.getMessage());
-            rollback();
-            // Not clear that this is the result for all remaining commands,
-            // but we cannot leave these null either.
-            for (; commandIndex < batchSql.length; commandIndex++)
-                mock[commandIndex] = exception(e);
         }
         return mock;
     }
