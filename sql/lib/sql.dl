@@ -14,6 +14,10 @@ function sql_array_contains(a: Vec<'A>, e: 'A): bool {
     vec_contains(a, e)
 }
 
+function sql_array_contains_N(a: Vec<Option<'A>>, e: 'A): bool {
+       vec_contains(a, Some{e})
+}
+
 function sql_array_length(a: Vec<'A>): signed<64> {
     vec_len(a) as signed<64>
 }
