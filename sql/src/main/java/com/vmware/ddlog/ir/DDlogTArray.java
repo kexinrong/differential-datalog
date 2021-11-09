@@ -58,4 +58,8 @@ public class DDlogTArray extends DDlogType {
             return false;
         return this.elemType.same(oa.elemType);
     }
+
+    public DDlogType getElemType() {
+        return elemType;
+    }
 }

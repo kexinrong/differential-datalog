@@ -561,8 +561,18 @@ public class ExpressionTranslationVisitor extends AstVisitor<DDlogExpression, Tr
         DDlogType type = functionResultType(node, name, args);
         boolean someNull = Linq.any(args, a -> a.getType().mayBeNull);
         String useName = "sql_" + name;
-        if (someNull)
-            useName += "_N";
+        if (name.equals("array_contains")) {
+            if (args.get(0).getType() instanceof DDlogTArray) {
+                // Now check the subtype
+                DDlogTArray ary = (DDlogTArray) args.get(0).getType();
+                if (ary.getElemType().mayBeNull) {
+                    useName += "_N";
+                }
+            }
+        } else {
+            if (someNull)
+                useName += "_N";
+        }
         if (varargs.contains(name)) {
             if (arguments.size() == 0)
                 throw new TranslationException("Function does not have arguments", node);
