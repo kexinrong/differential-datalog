@@ -8,8 +8,8 @@ import ddlogapi.DDlogAPI;
 import ddlogapi.DDlogException;
 import io.fabric8.kubernetes.api.model.*;
 import org.jooq.DSLContext;
-import org.jooq.Field;
 import org.jooq.Insert;
+import org.jooq.InsertOnDuplicateStep;
 import org.jooq.Query;
 import org.jooq.impl.DSL;
 import org.jooq.tools.jdbc.MockConnection;
@@ -25,6 +25,7 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 public class SlowJoinTest {
+    private static boolean manualOptimization = false;
     protected static DDlogAPI ddlogAPI;
     protected static DSLContext create;
     protected static DDlogJooqProvider provider;
@@ -33,16 +34,17 @@ public class SlowJoinTest {
             final List<R> ddl, final ToPrestoTranslator<R> translator,
             final List<String> createIndexStatements) throws IOException, DDlogException {
         final String fileName = "/tmp/program.dl";
-        /*final Translator t = new Translator(null);
-        ddl.forEach(x -> t.translateSqlStatement(translator.toPresto(x)));
-        createIndexStatements.forEach(t::translateCreateIndexStatement);
+        if (!manualOptimization) {
+            final Translator t = new Translator(null);
+            ddl.forEach(x -> t.translateSqlStatement(translator.toPresto(x)));
+            createIndexStatements.forEach(t::translateCreateIndexStatement);
 
-        final DDlogProgram dDlogProgram = t.getDDlogProgram();
-        final String fileName = "/tmp/program.dl";
-        File tmp = new File(fileName);
-        BufferedWriter bw = new BufferedWriter(new FileWriter(tmp));
-        bw.write(dDlogProgram.toString());
-        bw.close();*/
+            final DDlogProgram dDlogProgram = t.getDDlogProgram();
+            File tmp = new File(fileName);
+            BufferedWriter bw = new BufferedWriter(new FileWriter(tmp));
+            bw.write(dDlogProgram.toString());
+            bw.close();
+        }
         DDlogAPI.CompilationResult result = new DDlogAPI.CompilationResult(true);
         DDlogAPI.compileDDlogProgram(fileName, result, "../lib", "./lib");
         if (!result.isSuccess())
@@ -102,6 +104,29 @@ public class SlowJoinTest {
                 "  resource varchar(100) not null,\n" +
                 "  demand bigint not null\n" +
                 ")\n");
+        ddl.add("create table pod_images\n" +
+                "(\n" +
+                "  pod_uid varchar(36) not null,\n" +
+                "  image_name varchar(200) not null,\n" +
+                "  primary key (pod_uid)\n" +
+                ")");
+        ddl.add("create table pod_ports_request\n" +
+                "(\n" +
+                "  pod_uid varchar(36) not null,\n" +
+                "  host_ip varchar(100) not null,\n" +
+                "  host_port integer not null,\n" +
+                "  host_protocol varchar(10) not null,\n" +
+                "  primary key (pod_uid)\n" +
+                ")");
+        ddl.add("create table pod_tolerations\n" +
+                "(\n" +
+                "  pod_uid varchar(36) not null,\n" +
+                "  tolerations_key varchar(317),\n" +
+                "  tolerations_value varchar(63),\n" +
+                "  tolerations_effect varchar(100),\n" +
+                "  tolerations_operator varchar(100),\n" +
+                "  primary key(pod_uid)\n" +
+                ")");
 
         // Now add the slow capacity view
         ddl.add("create view spare_capacity_per_node as " +
@@ -134,6 +159,7 @@ public class SlowJoinTest {
         List<String> indexStatements = new ArrayList<>();
         indexStatements.add("create index pod_info_idx on pod_info (status, node_name)");
         indexStatements.add("create index pod_resource_demands_by_uid on pod_resource_demands (uid)");
+        indexStatements.add("create index pod_ports_request_by_uid on pod_ports_request (pod_uid)");
 
         ddlogAPI = compileAndLoad(
                 ddl.stream().map(CalciteSqlStatement::new).collect(Collectors.toList()),
@@ -315,9 +341,292 @@ public class SlowJoinTest {
         return node;
     }
 
+    private boolean hasNodeSelector(final Pod pod) {
+        final PodSpec podSpec = pod.getSpec();
+        return  (podSpec.getNodeSelector() != null && podSpec.getNodeSelector().size() > 0)
+                || (podSpec.getAffinity() != null
+                && podSpec.getAffinity().getNodeAffinity() != null
+                && podSpec.getAffinity().getNodeAffinity()
+                .getRequiredDuringSchedulingIgnoredDuringExecution() != null
+                && podSpec.getAffinity().getNodeAffinity()
+                .getRequiredDuringSchedulingIgnoredDuringExecution()
+                .getNodeSelectorTerms().size() > 0);
+    }
+
+    private long equivalenceClassHash(final Pod pod) {
+        return Objects.hash(pod.getMetadata().getNamespace(),
+                pod.getMetadata().getLabels(),
+                pod.getSpec().getAffinity(),
+                pod.getSpec().getInitContainers(),
+                pod.getSpec().getNodeName(),
+                pod.getSpec().getNodeSelector(),
+                pod.getSpec().getTolerations(),
+                pod.getSpec().getVolumes());
+    }
+
+    enum QosClass {
+        Guaranteed,
+        BestEffort,
+        Burstable
+    }
+
+    private QosClass getQosClass(final List<ResourceRequirements> resourceRequirements) {
+        final List<String> supportedResources = new ArrayList<>();
+        supportedResources.add("cpu");
+        supportedResources.add("memory");
+        boolean isGuaranteed = true;
+        boolean bestEffort = true;
+        for (final ResourceRequirements reqs: resourceRequirements) {
+            for (final String supportedResource: supportedResources) {
+                final Quantity request = reqs.getRequests() == null ? null : reqs.getRequests().get(supportedResource);
+                final Quantity limit = reqs.getLimits() == null ? null : reqs.getLimits().get(supportedResource);
+                if (request != null || limit != null) {
+                    bestEffort = false;
+                }
+                if (request == null || !request.equals(limit)) {
+                    isGuaranteed = false;
+                }
+            }
+        }
+
+        if (bestEffort) {
+            return QosClass.BestEffort;
+        }
+        if (isGuaranteed) {
+            return QosClass.Guaranteed;
+        }
+        return QosClass.Burstable;
+    }
+
+    private List<Query> updatePodRecord(final Pod pod, final DSLContext conn) {
+        final List<Query> inserts = new ArrayList<>();
+        final List<ResourceRequirements> resourceRequirements = pod.getSpec().getContainers().stream()
+                .map(Container::getResources)
+                .collect(Collectors.toList());
+
+        // The first owner reference is used to break symmetries.
+        final List<OwnerReference> owners = pod.getMetadata().getOwnerReferences();
+        final String ownerName = (owners == null || owners.size() == 0) ? "" : owners.get(0).getName();
+        final boolean hasNodeSelector = hasNodeSelector(pod);
+
+        boolean hasPodAffinityRequirements = false;
+        boolean hasPodAntiAffinityRequirements = false;
+        boolean hasNodePortRequirements = false;
+        boolean hasPodTopologySpreadConstraints = false;
+
+        if (pod.getSpec().getAffinity() != null && pod.getSpec().getAffinity().getPodAffinity() != null) {
+            hasPodAffinityRequirements = true;
+        }
+        if (pod.getSpec().getAffinity() != null && pod.getSpec().getAffinity().getPodAntiAffinity() != null) {
+            hasPodAntiAffinityRequirements = true;
+        }
+        if (pod.getSpec().getContainers() != null
+                && pod.getSpec().getContainers().stream()
+                .filter(c -> c.getPorts() != null).flatMap(c -> c.getPorts().stream())
+                .anyMatch(containerPort -> containerPort.getHostPort() != null)) {
+            hasNodePortRequirements = true;
+        }
+        if (pod.getSpec().getTopologySpreadConstraints() != null
+                && !pod.getSpec().getTopologySpreadConstraints().isEmpty()) {
+            hasPodTopologySpreadConstraints = true;
+        }
+
+        final int priority = Math.min(pod.getSpec().getPriority() == null ? 10 : pod.getSpec().getPriority(), 100);
+        final long resourceVersion = Long.parseLong(pod.getMetadata().getResourceVersion());
+
+
+        // In order for this insert to work for the DDlog backend, we MUST ensure the columns are ordered exactly
+        // as they are ordered in the table creation SQL statement.
+        final InsertOnDuplicateStep podInfoInsert = conn.insertInto(DSL.table("POD_INFO"),
+                        DSL.field("UID"),
+                        DSL.field("POD_NAME"),
+                        DSL.field("STATUS"),
+                        DSL.field("NODE_NAME"),
+                        DSL.field("NAMESPACE"),
+                        DSL.field("OWNER_NAME"),
+                        DSL.field("CREATION_TIMESTAMP"),
+                        DSL.field("PRIORITY"),
+                        DSL.field("SCHEDULERNAME"),
+                        DSL.field("HAS_NODE_SELECTOR_LABELS"),
+                        DSL.field("HAS_POD_AFFINITY_REQUIREMENTS"),
+                        DSL.field("HAS_POD_ANTI_AFFINITY_REQUIREMENTS"),
+                        DSL.field("HAS_NODE_PORT_REQUIREMENTS"),
+                        DSL.field("HAS_TOPOLOGY_SPREAD_CONSTRAINTS"),
+                        DSL.field("EQUIVALENCE_CLASS"),
+                        DSL.field("QOS_CLASS"),
+                        DSL.field("RESOURCEVERSION"),
+                        DSL.field("LAST_REQUEUE"))
+                .values(pod.getMetadata().getUid(),
+                        pod.getMetadata().getName(),
+                        pod.getStatus().getPhase(),
+                        pod.getSpec().getNodeName(),
+                        pod.getMetadata().getNamespace(),
+                        ownerName,
+                        pod.getMetadata().getCreationTimestamp(),
+                        priority,
+                        pod.getSpec().getSchedulerName(),
+                        hasNodeSelector,
+                        hasPodAffinityRequirements,
+                        hasPodAntiAffinityRequirements,
+                        hasNodePortRequirements,
+                        hasPodTopologySpreadConstraints,
+                        equivalenceClassHash(pod),
+                        getQosClass(resourceRequirements).toString(),
+                        resourceVersion,
+                        0
+                );
+        inserts.add(podInfoInsert);
+        return inserts;
+    }
+
+    private List<Insert<?>> updateContainerInfoForPod(final Pod pod, final DSLContext conn) {
+        final List<Insert<?>> inserts = new ArrayList<>();
+        conn.deleteFrom(DSL.table("POD_IMAGES"))
+                .where(DSL.field("POD_UID").eq(pod.getMetadata().getUid()))
+                .execute();
+        conn.deleteFrom(DSL.table("POD_PORTS_REQUEST"))
+                .where(DSL.field("POD_UID").eq(pod.getMetadata().getUid()))
+                .execute();
+
+        // Record all unique images in the container
+        pod.getSpec().getContainers().stream()
+                .map(Container::getImage)
+                .distinct()
+                .forEach(image ->
+                        inserts.add(conn.insertInto(DSL.table("POD_IMAGES")).values(pod.getMetadata().getUid(), image))
+                );
+
+        for (final Container container: pod.getSpec().getContainers()) {
+            if (container.getPorts() == null || container.getPorts().isEmpty()) {
+                continue;
+            }
+            for (final ContainerPort portInfo: container.getPorts()) {
+                if (portInfo.getHostPort() == null) {
+                    continue;
+                }
+                inserts.add(conn.insertInto(DSL.table("POD_PORTS_REQUEST"))
+                        .values(pod.getMetadata().getUid(),
+                                portInfo.getHostIP() == null ? "0.0.0.0" : portInfo.getHostIP(),
+                                portInfo.getHostPort(),
+                                portInfo.getProtocol()));
+            }
+        }
+        return inserts;
+    }
+
+    private List<Insert> updatePodLabels(final Pod pod, final DSLContext conn) {
+        // Update pod_labels table. This will be used for managing affinities, I think?
+        final Map<String, String> labels = pod.getMetadata().getLabels();
+        if (labels != null) {
+            return labels.entrySet().stream().map(
+                    (label) -> conn.insertInto(DSL.table("POD_LABELS"))
+                            .values(pod.getMetadata().getUid(), label.getKey(), label.getValue())
+            ).collect(Collectors.toList());
+        }
+        return Collections.emptyList();
+    }
+
+    private List<Insert> updatePodTolerations(final Pod pod, final DSLContext conn) {
+        if (pod.getSpec().getTolerations() == null) {
+            return Collections.emptyList();
+        }
+        conn.deleteFrom(DSL.table("POD_TOLERATIONS"))
+                .where(DSL.field("POD_UID").eq(pod.getMetadata().getUid())).execute();
+        final List<Insert> inserts = new ArrayList<>();
+        for (final Toleration toleration: pod.getSpec().getTolerations()) {
+            inserts.add(conn.insertInto(DSL.table("POD_TOLERATIONS"))
+                    .values(pod.getMetadata().getUid(),
+                            toleration.getKey() == null ? "" : toleration.getKey(),
+                            toleration.getValue() == null ? "" : toleration.getValue(),
+                            toleration.getEffect() == null ? "" : toleration.getEffect(),
+                            toleration.getOperator() == null ? "Equal" : toleration.getOperator()));
+        }
+        return Collections.unmodifiableList(inserts);
+    }
+
+    private List<Insert<?>> updateResourceRequests(final Pod pod, final DSLContext conn) {
+        conn.deleteFrom(DSL.table("POD_RESOURCE_DEMANDS"))
+                .where(DSL.field("UID").eq(pod.getMetadata().getUid())).execute();
+        final List<Insert<?>> inserts = new ArrayList<>();
+        final Map<String, Long> resourceRequirements = pod.getSpec().getContainers().stream()
+                .map(Container::getResources)
+                .filter(Objects::nonNull)
+                .map(ResourceRequirements::getRequests)
+                .filter(Objects::nonNull)
+                .flatMap(e -> e.entrySet().stream())
+                .collect(Collectors.toMap(Map.Entry::getKey,
+                        es -> convertUnit(es.getValue(), es.getKey()),
+                        Long::sum));
+        final Map<String, Long> overheads = pod.getSpec().getOverhead() != null ?
+                pod.getSpec().getOverhead().entrySet().stream()
+                        .collect(Collectors.toMap(Map.Entry::getKey,
+                                es -> convertUnit(es.getValue(), es.getKey()),
+                                Long::sum)) : new HashMap<>();
+        resourceRequirements.putIfAbsent("pods", 1L);
+        resourceRequirements.forEach((resource, demand) -> inserts.add(
+                conn.insertInto(DSL.table("POD_RESOURCE_DEMANDS"))
+                        .values(pod.getMetadata().getUid(), resource, demand + overheads.getOrDefault(resource, 0L))
+        ));
+        return inserts;
+    }
+
+    private void addPod(final Pod pod) {
+        /*if (pod.getMetadata().getUid() != null &&
+                deletedUids.getIfPresent(pod.getMetadata().getUid()) != null) {
+            LOG.trace("Received stale event for pod that we already deleted: {} (uid: {}, resourceVersion {}). " +
+                            "Ignoring", pod.getMetadata().getName(), pod.getMetadata().getUid(),
+                    pod.getMetadata().getResourceVersion());
+            return;
+        }*/
+        final List<Query> inserts = new ArrayList<>();
+        inserts.addAll(updatePodRecord(pod, create));
+        inserts.addAll(updateContainerInfoForPod(pod, create));
+        inserts.addAll(updatePodLabels(pod, create));
+        inserts.addAll(updatePodTolerations(pod, create));
+        inserts.addAll(updateResourceRequests(pod, create));
+        /*inserts.addAll(updatePodAffinity(pod, conn));
+        inserts.addAll(updatePodTopologySpread(pod, conn));*/
+        create.batch(inserts).execute();
+    }
+
+    private static Pod newPod(final String podName, final UUID uid, final String phase,
+                              final Map<String, String> selectorLabels, final Map<String, String> labels) {
+        final Pod pod = new Pod();
+        final ObjectMeta meta = new ObjectMeta();
+        meta.setUid(uid.toString());
+        meta.setName(podName);
+        meta.setLabels(labels);
+        meta.setCreationTimestamp("1");
+        meta.setNamespace("default");
+        final PodSpec spec = new PodSpec();
+        spec.setSchedulerName("dcm-scheduler");
+        spec.setPriority(0);
+        spec.setNodeSelector(selectorLabels);
+
+        final Container container = new Container();
+        container.setName("pause");
+        container.setImage("ignore");
+
+        final ResourceRequirements resourceRequirements = new ResourceRequirements();
+        resourceRequirements.setRequests(Collections.emptyMap());
+        container.setResources(resourceRequirements);
+        spec.getContainers().add(container);
+
+        final Affinity affinity = new Affinity();
+        final NodeAffinity nodeAffinity = new NodeAffinity();
+        affinity.setNodeAffinity(nodeAffinity);
+        spec.setAffinity(affinity);
+        final PodStatus status = new PodStatus();
+        status.setPhase(phase);
+        pod.setMetadata(meta);
+        pod.setSpec(spec);
+        pod.setStatus(status);
+        return pod;
+    }
+
     @Test
     public void slowJoinTest() {
-        int numNodes = 50000;
+        int numNodes = 10000;
 
         for (int i = 0; i < numNodes; i++) {
             final String nodeName = "n" + i;
@@ -328,7 +637,7 @@ public class SlowJoinTest {
             onAddSync(node);
 
             // Add one system pod per node
-           /* final String podName = "system-pod-" + nodeName;
+            final String podName = "system-pod-" + nodeName;
             final String status = "Running";
             final Pod pod = newPod(podName, UUID.randomUUID(), status, Collections.emptyMap(), Collections.emptyMap());
             final Map<String, Quantity> resourceRequests = new HashMap<>();
@@ -339,7 +648,7 @@ public class SlowJoinTest {
             pod.getMetadata().setResourceVersion("1");
             pod.getSpec().getContainers().get(0).getResources().setRequests(resourceRequests);
             pod.getSpec().setNodeName(nodeName);
-            handler.onAddSync(pod);*/
+            addPod(pod);
         }
     }
 
