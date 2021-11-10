@@ -32,7 +32,8 @@ public class SlowJoinTest {
     public static <R extends SqlStatement> DDlogAPI compileAndLoad(
             final List<R> ddl, final ToPrestoTranslator<R> translator,
             final List<String> createIndexStatements) throws IOException, DDlogException {
-        final Translator t = new Translator(null);
+        final String fileName = "/tmp/program.dl";
+        /*final Translator t = new Translator(null);
         ddl.forEach(x -> t.translateSqlStatement(translator.toPresto(x)));
         createIndexStatements.forEach(t::translateCreateIndexStatement);
 
@@ -41,7 +42,7 @@ public class SlowJoinTest {
         File tmp = new File(fileName);
         BufferedWriter bw = new BufferedWriter(new FileWriter(tmp));
         bw.write(dDlogProgram.toString());
-        bw.close();
+        bw.close();*/
         DDlogAPI.CompilationResult result = new DDlogAPI.CompilationResult(true);
         DDlogAPI.compileDDlogProgram(fileName, result, "../lib", "./lib");
         if (!result.isSuccess())
@@ -316,7 +317,7 @@ public class SlowJoinTest {
 
     @Test
     public void slowJoinTest() {
-        int numNodes = 5000;
+        int numNodes = 50000;
 
         for (int i = 0; i < numNodes; i++) {
             final String nodeName = "n" + i;
