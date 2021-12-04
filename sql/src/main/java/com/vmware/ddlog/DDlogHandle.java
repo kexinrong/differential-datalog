@@ -46,7 +46,7 @@ import java.util.function.Consumer;
 
 public class DDlogHandle {
     DDlogProgram program;
-    DDlogAPI api;
+    public DDlogAPI api;
 
     // Unfortunately, `create index` statements have to be passed separately, because neither Calcite nor Presto
     // supports them, so we must pass them as SQL strings.
@@ -71,7 +71,12 @@ public class DDlogHandle {
             if (!result.isSuccess())
                 throw new RuntimeException("Failed to compile ddlog program");
         }
-        this.api = DDlogAPI.loadDDlog();
+        DDlogConfig config = new DDlogConfig(2);
+        config.setProfilingConfig(DDlogConfig.selfProfiling());
+        this.api = new DDlogAPI(config, false);
+        this.api.enableCpuProfiling(true);
+        this.api.recordCommands("recordedCommands.out", false);
+        //this.api = DDlogAPI.loadDDlog();
     }
 
     public <R extends SqlStatement> DDlogHandle(final List<R> ddl, final ToPrestoTranslator<R> translator,
