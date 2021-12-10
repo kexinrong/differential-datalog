@@ -71,7 +71,7 @@ public class DDlogHandle {
             if (!result.isSuccess())
                 throw new RuntimeException("Failed to compile ddlog program");
         }
-        DDlogConfig config = new DDlogConfig(2);
+        DDlogConfig config = new DDlogConfig(1);
         config.setProfilingConfig(DDlogConfig.selfProfiling());
         this.api = new DDlogAPI(config, false);
         this.api.enableCpuProfiling(true);
