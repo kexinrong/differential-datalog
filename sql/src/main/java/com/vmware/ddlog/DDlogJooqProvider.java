@@ -26,6 +26,7 @@ package com.vmware.ddlog;
 
 import com.vmware.ddlog.util.sql.CreateIndexParser;
 import com.vmware.ddlog.util.sql.H2SqlStatement;
+import com.vmware.ddlog.util.DeltaCallBack;
 import ddlogapi.DDlogCommand;
 import ddlogapi.DDlogException;
 import ddlogapi.DDlogRecCommand;
@@ -137,6 +138,8 @@ public final class DDlogJooqProvider implements MockDataProvider {
     private final DDlogJooqHelper whereHelper;
     public static boolean trace = false;
     public final Object lock = new Object();
+    // List of call back functions
+    List<DeltaCallBack> callBackList = new ArrayList<DeltaCallBack>();
 
     public DDlogJooqProvider(final DDlogHandle handle, final List<H2SqlStatement> sqlStatements) {
         this.ddlogHandle = handle;
@@ -174,6 +177,10 @@ public final class DDlogJooqProvider implements MockDataProvider {
             }
         }
         this.whereHelper.seal();
+    }
+
+    public void registerDeltaCallBack(DeltaCallBack callback) {
+        callBackList.add(callback);
     }
 
     public static String toIdentityViewName(String inputTableName) {
@@ -277,6 +284,7 @@ public final class DDlogJooqProvider implements MockDataProvider {
                 setValue(fields.get(i), record.getStructField(i), jooqRecord);
             }
             final Set<Record> materializedView = materializedViews.computeIfAbsent(tableName, (k) -> new LinkedHashSet<>());
+            DeltaCallBack.DeltaType type = DeltaCallBack.DeltaType.ADD;
             switch (command.kind()) {
                 case Insert:
                     materializedView.add(jooqRecord);
@@ -284,8 +292,13 @@ public final class DDlogJooqProvider implements MockDataProvider {
                 case DeleteKey:
                     throw new RuntimeException("Did not expect DeleteKey command type");
                 case DeleteVal:
+                    type = DeltaCallBack.DeltaType.DEL;
                     materializedView.remove(jooqRecord);
                     break;
+            }
+            // Go through callback list
+            for (DeltaCallBack callBack : callBackList) {
+                callBack.processDelta(type, jooqRecord);
             }
         } catch (DDlogException ex) {
             if (trace)
