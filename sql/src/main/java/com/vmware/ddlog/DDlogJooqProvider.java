@@ -62,6 +62,7 @@ import java.sql.SQLException;
 import java.sql.Types;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
@@ -69,7 +70,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.locks.ReentrantLock;
 
 import static org.jooq.impl.DSL.field;
 
@@ -250,7 +250,8 @@ public final class DDlogJooqProvider implements MockDataProvider {
             throw new DDlogJooqProviderException(String.format("Table %s does not exist", maybeIdentityView));
         }
         final Result<Record> result = dslContext.newResult(fields);
-        final Set<Record> records = materializedViews.computeIfAbsent(maybeIdentityView, (k) -> new LinkedHashSet<>());
+        final Set<Record> records = materializedViews.computeIfAbsent(maybeIdentityView,
+                (k) -> Collections.synchronizedSet(new LinkedHashSet<>()));
         records.forEach(r -> result.add(r.into(r.fields())));
         return result;
     }
@@ -283,7 +284,8 @@ public final class DDlogJooqProvider implements MockDataProvider {
             for (int i = 0; i < fields.size(); i++) {
                 setValue(fields.get(i), record.getStructField(i), jooqRecord);
             }
-            final Set<Record> materializedView = materializedViews.computeIfAbsent(tableName, (k) -> new LinkedHashSet<>());
+            final Set<Record> materializedView = materializedViews.computeIfAbsent(tableName,
+                    (k) -> Collections.synchronizedSet(new LinkedHashSet<>()));
             DeltaCallBack.DeltaType type = DeltaCallBack.DeltaType.ADD;
             switch (command.kind()) {
                 case Insert:

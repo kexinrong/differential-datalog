@@ -10,5 +10,5 @@ public interface DeltaCallBack {
         ADD, DEL
     }
 
-    public void processDelta(DeltaType type, Record record);
+    public void processDelta(final DeltaType type, final Record record);
 }
