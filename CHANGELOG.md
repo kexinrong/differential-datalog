@@ -4,6 +4,40 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.2.3] - Dec 13, 2021
+
+### Quality-of-life improvements
+
+- Avoid recompiling Rust crates when only arrangement debug info changes.
+
+## [1.2.2] - Dec 9, 2021
+
+### Bug fixes
+
+- Fix jump-to-record functionality in HTML profiles.
+
+## [1.2.1] - Dec 8, 2021
+
+### Bug fixes
+
+- Fix row highlighting in HTML profiles.
+
+## [1.2.0] - Dec 8, 2021
+
+### Bug fixes
+
+- Fix broken command recording in the `DDlogDynamic` API.
+
+### SQL-to-DDlog compiler
+
+- More efficient joins
+- Bug fixes
+
+### Self-profiler
+
+- Add anchors to the profile, so one can create hyperlinks to individual profile
+  entries.
+
 ## [1.1.0] - Nov 12, 2021
 
 ### Rust API changes

@@ -32,7 +32,7 @@ import javax.annotation.Nullable;
  * Wrapper class for a DDlog vector type.
  */
 public class DDlogTArray extends DDlogType {
-    private final DDlogType elemType;
+    public final DDlogType elemType;
 
     public DDlogTArray(@Nullable Node node, DDlogType elemType, boolean mayBeNull) {
         super(node, mayBeNull);
@@ -46,6 +46,8 @@ public class DDlogTArray extends DDlogType {
 
     @Override
     public DDlogType setMayBeNull(boolean mayBeNull) {
+        if (this.mayBeNull == mayBeNull)
+            return this;
         return new DDlogTArray(this.getNode(), this.elemType, mayBeNull);
     }
 

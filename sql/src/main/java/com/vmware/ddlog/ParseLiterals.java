@@ -37,19 +37,6 @@ import org.apache.calcite.sql.util.SqlBasicVisitor;
  */
 class ParseLiterals extends SqlBasicVisitor<DDlogRecord> {
     @Override
-    public DDlogRecord visit(final SqlCall sqlCall) {
-        SqlNode[] arrayElements = ((SqlBasicCall) sqlCall).getOperands();
-        DDlogRecord[] items = new DDlogRecord[arrayElements.length];
-        for (int i = 0; i < items.length; i++) {
-            items[i] = arrayElements[i].accept(this);
-        }
-        try {
-            return DDlogRecord.makeVector(items);
-        } catch (final DDlogException e) {
-            throw new RuntimeException(e);
-        }
-    }
-    @Override
     public DDlogRecord visit(final SqlLiteral sqlLiteral) {
         switch (sqlLiteral.getTypeName()) {
             case BOOLEAN:
@@ -59,12 +46,32 @@ class ParseLiterals extends SqlBasicVisitor<DDlogRecord> {
             case CHAR:
                 try {
                     return new DDlogRecord(sqlLiteral.toValue());
-                } catch (final DDlogException ignored) {
+                } catch (final DDlogException ex) {
+                    throw new RuntimeException(ex);
                 }
             case NULL:
                 return null;
             default:
                 throw new UnsupportedOperationException(sqlLiteral.toValue());
         }
+    }
+
+    @Override
+    public DDlogRecord visit(final SqlCall call) {
+        // Array literals are represented by a SqlCall node
+        if (call instanceof SqlBasicCall) {
+            SqlBasicCall bc = (SqlBasicCall)call;
+            DDlogRecord[] fields = new DDlogRecord[bc.operandCount()];
+            for (int i = 0; i < bc.operandCount(); i++) {
+                SqlNode node = bc.operand(i);
+                fields[i] = node.accept(this);
+            }
+            try {
+                return DDlogRecord.makeVector(fields);
+            } catch (final DDlogException ex) {
+                throw new RuntimeException(ex);
+            }
+        }
+        throw new UnsupportedOperationException(call.toString());
     }
 }

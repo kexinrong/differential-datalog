@@ -213,44 +213,6 @@ export function removeAllChildren(h: HTMLElement): void {
 }
 
 /**
- * Display only the significant digits of a number; returns an HtmlString.
- * @param n  number to display for human consumption.
- */
-export function significantDigitsHtml(n: number): HtmlString {
-    let suffix = "";
-    if (n === 0)
-        return new HtmlString("0");
-    const absn = Math.abs(n);
-    if (absn > 1e12) {
-        suffix = "T";
-        n = n / 1e12;
-    } else if (absn > 1e9) {
-        suffix = "B";
-        n = n / 1e9;
-    } else if (absn > 1e6) {
-        suffix = "M";
-        n = n / 1e6;
-    } else if (absn > 1e3) {
-        suffix = "K";
-        n = n / 1e3;
-    } else if (absn < .001) {
-        let expo = 0;
-        while (n < .1) {
-            n = n * 10;
-            expo++;
-        }
-        suffix = "&times;10<sup>-" + expo + "</sup>";
-    }
-    if (absn > 1)
-        n = Math.round(n * 100) / 100;
-    else
-        n = Math.round(n * 1000) / 1000;
-    const result = new HtmlString(String(n));
-    result.appendSafeString(suffix);
-    return result;
-}
-
-/**
  * convert a number to a string and prepend zeros if necessary to
  * bring the integer part to the specified number of digits
  */
@@ -263,13 +225,6 @@ export function zeroPad(num: number, length: number): string {
     }
 
     return zeroString + n;
-}
-
-export function repeat(c: string, count: number): string {
-    let result = "";
-    for (let i = 0; i < count; i++)
-        result += c;
-    return result;
 }
 
 /**
@@ -437,30 +392,44 @@ class ProfileTable implements IHtmlElement {
         ["short_descr", "description"],
         ["dd_op", "DD operator"]
     ]);
-    protected static readonly baseDocUrl = "https://github.com/vmware/differential-datalog/wiki/profiler_help#";
     protected displayedColumns: string[];
     protected total: number = 0;
+    private data: Partial<ProfileRow>[];
 
-    constructor(protected errorReporter: ErrorReporter, protected isCpu: boolean) {
+    constructor(protected errorReporter: ErrorReporter, protected name: string, protected isCpu: boolean) {
         this.table = document.createElement("table");
+        this.data = [];
         const thead = this.table.createTHead();
         const header = thead.insertRow();
+        let columns;
+        this.displayedColumns = [];
         if (isCpu)
-            this.displayedColumns = ProfileTable.cpuColumns;
+            columns = ProfileTable.cpuColumns;
         else
-            this.displayedColumns = ProfileTable.memoryColumns;
-        for (let c of this.displayedColumns) {
+            columns = ProfileTable.memoryColumns;
+        for (let c of columns) {
             if (c == "histogram") {
                 if (isCpu && !this.showCpuHistogram)
                     continue;
                 if (!isCpu && !this.showMemHistogram)
                     continue;
             }
+            this.displayedColumns.push(c);
             const cell = header.insertCell();
             cell.textContent = ProfileTable.cellNames.get(c)!;
             cell.classList.add(c);
         }
         this.tbody = this.table.createTBody();
+    }
+
+    protected getId(row: Partial<ProfileRow>): string {
+        let id = row.opid;
+        let ids;
+        if (id == null)
+            ids = "0";
+        else
+            ids = id.toString();
+        return this.name.replace(/[^a-zA-Z0-9]/g, "_").toLowerCase() + "_" + ids;
     }
 
     protected addDataRow(indent: number, rowIndex: number, row: Partial<ProfileRow>,
@@ -475,11 +444,11 @@ class ProfileTable implements IHtmlElement {
             children: row.children === undefined ? [] : row.children,
             dd_op: row.dd_op === undefined ? "" : row.dd_op,
             invocations: row.invocations === undefined ? -1 : row.invocations,
-            opid: row.opid === undefined ? -1 : row.opid,
+            opid: row.opid === undefined ? 0 : row.opid,
             short_descr: row.short_descr === undefined ? "" : row.short_descr
         };
 
-
+        let id = this.getId(safeRow);
         for (let k of this.displayedColumns) {
             let key = k as keyof ProfileRow;
             let value = safeRow[key];
@@ -530,6 +499,10 @@ class ProfileTable implements IHtmlElement {
                     cell.title = "Expand";
                     cell.classList.add("clickable");
                     cell.onclick = () => this.expand(indent + 1, trow, cell, children, histogramStart);
+                }
+                if (id != null) {
+                    cell.id = id!;
+                    cell.title = id;
                 }
             }
             if ((k === "size" && this.showMemHistogram) || (k == "cpu_us" && this.showCpuHistogram)) {
@@ -666,6 +639,7 @@ class ProfileTable implements IHtmlElement {
      * Whatever used to be displayed is removed.
      */
     public setData(rows: Partial<ProfileRow>[]): void {
+        this.data = rows;
         this.table.removeChild(this.tbody);
         this.tbody = this.table.createTBody();
         for (const row of rows)
@@ -677,6 +651,60 @@ class ProfileTable implements IHtmlElement {
             this.addDataRow(0, -1, row, rowIndex == rows.length - 1, histogramStart);
             histogramStart += this.getDataSize(row);
         }
+    }
+
+    protected findPathFromRow(r: Partial<ProfileRow>, id: string): string[] | null {
+        let thisId = this.getId(r);
+        if (thisId == id) {
+            return [thisId];
+        }
+        if (r.children == null)
+            return null;
+        for (let c of r.children) {
+            let p = this.findPathFromRow(c, id);
+            if (p != null) {
+                p.push(thisId);
+                return p;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Find a path of rows that leads to the element with the specified id.
+     */
+    protected findPath(toId: string): string[] | null {
+        for (let r of this.data) {
+            let path = this.findPathFromRow(r, toId);
+            if (path != null)
+                return path;
+        }
+        return null;
+    }
+
+    protected expandPath(path: string[]): void {
+        path.reverse();
+        for (let p of path) {
+            let elem = document.getElementById(p)!;
+            elem.click();
+            elem.parentElement!.classList.add("highlight");
+        }
+        let last = document.getElementById(path[path.length - 1]);
+        last!.parentElement!.classList.add("show");
+        last!.scrollIntoView();
+    }
+
+    /**
+     * Find the node with the specified id and make sure it is visible.
+     * If no such node exists, then return false;
+     * @param id
+     */
+    navigate(id: string): boolean {
+        let path = this.findPath(id);
+        if (path == null)
+            return false;
+        this.expandPath(path);
+        return true;
     }
 }
 
@@ -837,11 +865,13 @@ class ScriptLoader {
 class ProfileUI implements IHtmlElement {
     protected topLevel: HTMLElement;
     protected errorReporter: ErrorDisplay;
+    protected profiles: ProfileTable[];
 
     constructor() {
         this.topLevel = document.createElement("div");
         this.errorReporter = new ErrorDisplay();
         this.topLevel.appendChild(this.errorReporter.getHTMLRepresentation());
+        this.profiles = [];
     }
 
     /**
@@ -855,8 +885,9 @@ class ProfileUI implements IHtmlElement {
         const h1 = document.createElement("h1");
         h1.textContent = profile.name;
         this.topLevel.appendChild(h1);
-        const profileTable = new ProfileTable(this.errorReporter, profile.type.toLowerCase() === "cpu");
-        this.topLevel.appendChild(profileTable.getHTMLRepresentation())
+        const profileTable = new ProfileTable(this.errorReporter, profile.name,profile.type.toLowerCase() === "cpu");
+        this.topLevel.appendChild(profileTable.getHTMLRepresentation());
+        this.profiles.push(profileTable);
         profileTable.setData(profile.records);
     }
 
@@ -864,6 +895,17 @@ class ProfileUI implements IHtmlElement {
         for (let profile of profiles) {
             this.addProfile(profile);
         }
+    }
+
+    /**
+     * Find the element with the specified id and make sure it is visible.
+     * @param id Element id to search for.
+     */
+    navigate(id: string) {
+        id = id.replace("#", "");
+        for (let p of this.profiles)
+            if (p.navigate(id))
+                break;
     }
 }
 
@@ -879,4 +921,5 @@ export default function createUI(profiles: Profile[]): void {
     const ui = new ProfileUI();
     top.appendChild(ui.getHTMLRepresentation());
     ui.setData(profiles);
+    ui.navigate(window.location.hash);
 }

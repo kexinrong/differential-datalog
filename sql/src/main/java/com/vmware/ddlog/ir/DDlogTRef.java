@@ -25,36 +25,58 @@
 package com.vmware.ddlog.ir;
 
 import com.facebook.presto.sql.tree.Node;
+import ddlogapi.DDlogException;
 
 import javax.annotation.Nullable;
 
-public class DDlogTString extends DDlogType implements IDDlogBaseType {
-    public static DDlogTString instance = new DDlogTString(null,false);
+/**
+ * Reference type.
+ */
+public class DDlogTRef extends DDlogType {
+    public final DDlogType elemType;
 
-    private DDlogTString(@Nullable Node node, boolean mayBeNull) { super(node, mayBeNull); }
+    public DDlogTRef(@Nullable Node node, DDlogType elemType, boolean mayBeNull) {
+        super(node, mayBeNull);
+        this.elemType = elemType;
+    }
 
     @Override
-    public String toString() { return this.wrapOption("string"); }
+    public String toString() { return this.wrapOption("Ref<" + this.elemType + ">"); }
 
     @Override
     public DDlogType setMayBeNull(boolean mayBeNull) {
         if (this.mayBeNull == mayBeNull)
             return this;
-        return new DDlogTString(this.getNode(), mayBeNull);
+        return new DDlogTRef(this.getNode(), this.elemType, mayBeNull);
     }
 
     @Override
     public boolean same(DDlogType type) {
         if (!super.same(type))
             return false;
-        return type.is(DDlogTString.class);
+        DDlogTRef oa = type.as(DDlogTRef.class);
+        if (oa == null)
+            return false;
+        return this.elemType.same(oa.elemType);
     }
 
     /**
-     * Given an expression with type string intern it
+     * Given an expression whose type is a reference type, dereference it
+     * by calling deref()
      */
-    public static DDlogExpression intern(DDlogExpression expression) {
-        assert(expression.getType().is(DDlogTString.class));
-        return new DDlogEApply(expression.node, "intern", DDlogTIString.instance, true, expression);
+    public static DDlogExpression deref(DDlogExpression expression) {
+        DDlogType type = expression.getType();
+        DDlogType resultType = type.to(DDlogTRef.class).elemType;
+        return new DDlogEApply(expression.node, "deref",
+                resultType, true, expression);
+    }
+
+    /**
+     * Given an epression create a new expression that wraps this one in a reference
+     * by calling ref_new()
+     */
+    public static DDlogExpression ref_new(DDlogExpression expression) {
+        return new DDlogEApply(expression.node, "ref_new",
+                new DDlogTRef(expression.getNode(), expression.getType(), false), true, expression);
     }
 }

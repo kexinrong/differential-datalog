@@ -10,16 +10,19 @@ function sql_extract_month(d: Date): signed<64> {
     month(d) as signed<8> as signed<64>
 }
 
-function sql_array_contains(a: Vec<'A>, e: 'A): bool {
-    vec_contains(a, e)
+function sql_array_contains(a: Ref<Vec<'A>>, e: 'A): bool {
+    vec_contains(a.deref(), e)
 }
 
-function sql_array_contains_N(a: Vec<Option<'A>>, e: 'A): bool {
-       vec_contains(a, Some{e})
+function sql_array_contains_N(a: Ref<Vec<'A>>, e: Option<'A>): bool {
+    match (e) {
+        Some{v} -> vec_contains(a.deref(), v),
+        None -> false
+    }
 }
 
-function sql_array_length(a: Vec<'A>): signed<64> {
-    vec_len(a) as signed<64>
+function sql_array_length(a: Ref<Vec<'A>>): signed<64> {
+    vec_len(a.deref()) as signed<64>
 }
 
 function sql_extract_week(d: Date): signed<64> {
@@ -75,11 +78,11 @@ case TIMEZONE_MINUTE:
 case TIMEZONE_HOUR:
 */
 
-function sql_substr(s: string, start: signed<64>, end: signed<64>): string {
-   string_substr(s, start as bit<64>, (start + end) as bit<64>)
+function sql_substr(s: istring, start: signed<64>, end: signed<64>): istring {
+   string_substr(s.ival(), start as bit<64>, (start + end) as bit<64>).intern()
 }
 
-function sql_substr_N(s: Option<string>, start: signed<64>, end: signed<64>): Option<string> {
+function sql_substr_N(s: Option<istring>, start: signed<64>, end: signed<64>): Option<istring> {
    match (s) {
       Some{.x = var a} -> Some{sql_substr(a, start, end)},
       _                -> None
@@ -327,15 +330,15 @@ function avg_float_R(sum_count: (float, float)): float {
 function avg_double_R(sum_count: (double, double)): double {
     if (sum_count.1 == 64'f0.0) 64'f0.0 else (sum_count.0 / sum_count.1)
 }
-function sql_concat(s0: string, s1: string): string {
-     s0 ++ s1
+function sql_concat(s0: istring, s1: istring): istring {
+     (s0.ival() ++ s1.ival()).intern()
 }
-function sql_concat_N(s0: Option<string>, s1: Option<string>): Option<string> {
+function sql_concat_N(s0: Option<istring>, s1: Option<istring>): Option<istring> {
     match ((s0,s1)) {
         (None, None)       -> None,
         (None, Some{x})    -> None,
         (Some{x}, None)    -> None,
-        (Some{x}, Some{y}) -> Some{x ++ y}
+        (Some{x}, Some{y}) -> Some{sql_concat(x, y)}
     }
 }
 

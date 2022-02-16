@@ -22,6 +22,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.makeSpan = exports.ErrorDisplay = exports.ClosableCopyableContent = exports.zeroPad = exports.removeAllChildren = exports.HtmlString = exports.DataRangeUI = exports.percentString = exports.significantDigits = exports.px = exports.formatPositiveNumber = exports.SpecialChars = void 0;
 var Direction;
 (function (Direction) {
     Direction[Direction["Up"] = 0] = "Up";
@@ -195,48 +196,6 @@ function removeAllChildren(h) {
 }
 exports.removeAllChildren = removeAllChildren;
 /**
- * Display only the significant digits of a number; returns an HtmlString.
- * @param n  number to display for human consumption.
- */
-function significantDigitsHtml(n) {
-    var suffix = "";
-    if (n === 0)
-        return new HtmlString("0");
-    var absn = Math.abs(n);
-    if (absn > 1e12) {
-        suffix = "T";
-        n = n / 1e12;
-    }
-    else if (absn > 1e9) {
-        suffix = "B";
-        n = n / 1e9;
-    }
-    else if (absn > 1e6) {
-        suffix = "M";
-        n = n / 1e6;
-    }
-    else if (absn > 1e3) {
-        suffix = "K";
-        n = n / 1e3;
-    }
-    else if (absn < .001) {
-        var expo = 0;
-        while (n < .1) {
-            n = n * 10;
-            expo++;
-        }
-        suffix = "&times;10<sup>-" + expo + "</sup>";
-    }
-    if (absn > 1)
-        n = Math.round(n * 100) / 100;
-    else
-        n = Math.round(n * 1000) / 1000;
-    var result = new HtmlString(String(n));
-    result.appendSafeString(suffix);
-    return result;
-}
-exports.significantDigitsHtml = significantDigitsHtml;
-/**
  * convert a number to a string and prepend zeros if necessary to
  * bring the integer part to the specified number of digits
  */
@@ -250,13 +209,6 @@ function zeroPad(num, length) {
     return zeroString + n;
 }
 exports.zeroPad = zeroPad;
-function repeat(c, count) {
-    var result = "";
-    for (var i = 0; i < count; i++)
-        result += c;
-    return result;
-}
-exports.repeat = repeat;
 /**
  * A div with two buttons: to close it, and to copy its content to the
  * clipboard.
@@ -354,33 +306,47 @@ exports.ErrorDisplay = ErrorDisplay;
  * A class that knows how to display profile data.
  */
 var ProfileTable = /** @class */ (function () {
-    function ProfileTable(errorReporter, isCpu) {
+    function ProfileTable(errorReporter, name, isCpu) {
         this.errorReporter = errorReporter;
+        this.name = name;
         this.isCpu = isCpu;
         this.showCpuHistogram = true;
         this.showMemHistogram = false;
         this.total = 0;
         this.table = document.createElement("table");
+        this.data = [];
         var thead = this.table.createTHead();
         var header = thead.insertRow();
+        var columns;
+        this.displayedColumns = [];
         if (isCpu)
-            this.displayedColumns = ProfileTable.cpuColumns;
+            columns = ProfileTable.cpuColumns;
         else
-            this.displayedColumns = ProfileTable.memoryColumns;
-        for (var _i = 0, _a = this.displayedColumns; _i < _a.length; _i++) {
-            var c = _a[_i];
+            columns = ProfileTable.memoryColumns;
+        for (var _i = 0, columns_1 = columns; _i < columns_1.length; _i++) {
+            var c = columns_1[_i];
             if (c == "histogram") {
                 if (isCpu && !this.showCpuHistogram)
                     continue;
                 if (!isCpu && !this.showMemHistogram)
                     continue;
             }
+            this.displayedColumns.push(c);
             var cell = header.insertCell();
             cell.textContent = ProfileTable.cellNames.get(c);
             cell.classList.add(c);
         }
         this.tbody = this.table.createTBody();
     }
+    ProfileTable.prototype.getId = function (row) {
+        var id = row.opid;
+        var ids;
+        if (id == null)
+            ids = "0";
+        else
+            ids = id.toString();
+        return this.name.replace(/[^a-zA-Z0-9]/g, "_").toLowerCase() + "_" + ids;
+    };
     ProfileTable.prototype.addDataRow = function (indent, rowIndex, row, lastInSequence, histogramStart) {
         var _this = this;
         var trow = this.tbody.insertRow(rowIndex);
@@ -393,9 +359,10 @@ var ProfileTable = /** @class */ (function () {
             children: row.children === undefined ? [] : row.children,
             dd_op: row.dd_op === undefined ? "" : row.dd_op,
             invocations: row.invocations === undefined ? -1 : row.invocations,
-            opid: row.opid === undefined ? -1 : row.opid,
+            opid: row.opid === undefined ? 0 : row.opid,
             short_descr: row.short_descr === undefined ? "" : row.short_descr
         };
+        var id = this.getId(safeRow);
         var _loop_1 = function (k) {
             var key = k;
             var value = safeRow[key];
@@ -448,6 +415,10 @@ var ProfileTable = /** @class */ (function () {
                     cell_1.title = "Expand";
                     cell_1.classList.add("clickable");
                     cell_1.onclick = function () { return _this.expand(indent + 1, trow, cell_1, children_1, histogramStart); };
+                }
+                if (id != null) {
+                    cell_1.id = id;
+                    cell_1.title = id;
                 }
             }
             if ((k === "size" && this_1.showMemHistogram) || (k == "cpu_us" && this_1.showCpuHistogram)) {
@@ -585,6 +556,7 @@ var ProfileTable = /** @class */ (function () {
      * Whatever used to be displayed is removed.
      */
     ProfileTable.prototype.setData = function (rows) {
+        this.data = rows;
         this.table.removeChild(this.tbody);
         this.tbody = this.table.createTBody();
         for (var _i = 0, rows_1 = rows; _i < rows_1.length; _i++) {
@@ -597,6 +569,59 @@ var ProfileTable = /** @class */ (function () {
             this.addDataRow(0, -1, row, rowIndex == rows.length - 1, histogramStart);
             histogramStart += this.getDataSize(row);
         }
+    };
+    ProfileTable.prototype.findPathFromRow = function (r, id) {
+        var thisId = this.getId(r);
+        if (thisId == id) {
+            return [thisId];
+        }
+        if (r.children == null)
+            return null;
+        for (var _i = 0, _a = r.children; _i < _a.length; _i++) {
+            var c = _a[_i];
+            var p = this.findPathFromRow(c, id);
+            if (p != null) {
+                p.push(thisId);
+                return p;
+            }
+        }
+        return null;
+    };
+    /**
+     * Find a path of rows that leads to the element with the specified id.
+     */
+    ProfileTable.prototype.findPath = function (toId) {
+        for (var _i = 0, _a = this.data; _i < _a.length; _i++) {
+            var r = _a[_i];
+            var path = this.findPathFromRow(r, toId);
+            if (path != null)
+                return path;
+        }
+        return null;
+    };
+    ProfileTable.prototype.expandPath = function (path) {
+        path.reverse();
+        for (var _i = 0, path_1 = path; _i < path_1.length; _i++) {
+            var p = path_1[_i];
+            var elem = document.getElementById(p);
+            elem.click();
+            elem.parentElement.classList.add("highlight");
+        }
+        var last = document.getElementById(path[path.length - 1]);
+        last.parentElement.classList.add("show");
+        last.scrollIntoView();
+    };
+    /**
+     * Find the node with the specified id and make sure it is visible.
+     * If no such node exists, then return false;
+     * @param id
+     */
+    ProfileTable.prototype.navigate = function (id) {
+        var path = this.findPath(id);
+        if (path == null)
+            return false;
+        this.expandPath(path);
+        return true;
     };
     ProfileTable.cpuColumns = [
         "opid", SpecialChars.expand, "cpu_us", "histogram",
@@ -616,7 +641,6 @@ var ProfileTable = /** @class */ (function () {
         ["short_descr", "description"],
         ["dd_op", "DD operator"]
     ]);
-    ProfileTable.baseDocUrl = "https://github.com/vmware/differential-datalog/wiki/profiler_help#";
     return ProfileTable;
 }());
 /**
@@ -774,6 +798,7 @@ var ProfileUI = /** @class */ (function () {
         this.topLevel = document.createElement("div");
         this.errorReporter = new ErrorDisplay();
         this.topLevel.appendChild(this.errorReporter.getHTMLRepresentation());
+        this.profiles = [];
     }
     /**
      * Returns the html representation of the UI.
@@ -785,14 +810,27 @@ var ProfileUI = /** @class */ (function () {
         var h1 = document.createElement("h1");
         h1.textContent = profile.name;
         this.topLevel.appendChild(h1);
-        var profileTable = new ProfileTable(this.errorReporter, profile.type.toLowerCase() === "cpu");
+        var profileTable = new ProfileTable(this.errorReporter, profile.name, profile.type.toLowerCase() === "cpu");
         this.topLevel.appendChild(profileTable.getHTMLRepresentation());
+        this.profiles.push(profileTable);
         profileTable.setData(profile.records);
     };
     ProfileUI.prototype.setData = function (profiles) {
         for (var _i = 0, profiles_1 = profiles; _i < profiles_1.length; _i++) {
             var profile = profiles_1[_i];
             this.addProfile(profile);
+        }
+    };
+    /**
+     * Find the element with the specified id and make sure it is visible.
+     * @param id Element id to search for.
+     */
+    ProfileUI.prototype.navigate = function (id) {
+        id = id.replace("#", "");
+        for (var _i = 0, _a = this.profiles; _i < _a.length; _i++) {
+            var p = _a[_i];
+            if (p.navigate(id))
+                break;
         }
     };
     return ProfileUI;
@@ -809,6 +847,7 @@ function createUI(profiles) {
     var ui = new ProfileUI();
     top.appendChild(ui.getHTMLRepresentation());
     ui.setData(profiles);
+    ui.navigate(window.location.hash);
 }
 exports.default = createUI;
 //# sourceMappingURL=ui.js.map

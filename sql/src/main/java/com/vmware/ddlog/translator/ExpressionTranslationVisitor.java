@@ -31,6 +31,7 @@ import com.vmware.ddlog.ir.*;
 import com.vmware.ddlog.translator.environment.IEnvironment;
 import com.vmware.ddlog.util.Linq;
 import com.vmware.ddlog.util.Utilities;
+import ddlogapi.DDlogException;
 
 import javax.annotation.Nullable;
 import java.math.BigInteger;
@@ -137,9 +138,9 @@ public class ExpressionTranslationVisitor extends AstVisitor<DDlogExpression, Tr
         DDlogExpression e = this.process(node.getExpression(), context);
         DDlogType eType = e.getType();
         DDlogType destType = SqlSemantics.createType(node, node.getType(), e.getType().mayBeNull);
-        if (destType.is(DDlogTString.class)) {
+        if (destType.is(DDlogTIString.class)) {
             // convert to string
-            if (eType.is(DDlogTString.class)) {
+            if (eType.is(DDlogTIString.class)) {
                 return e;
             } else if (eType.is(DDlogTSigned.class) ||
                     eType.is(DDlogTBool.class) ||
@@ -147,20 +148,20 @@ public class ExpressionTranslationVisitor extends AstVisitor<DDlogExpression, Tr
                     eType.is(DDlogTDouble.class) ||
                     eType.is(DDlogTUser.class)) {
                 Function<DDlogExpression, DDlogExpression> wrapper =
-                        ex -> new DDlogEString(node, "${" + ex.toString() + "}");
+                        ex -> new DDlogEIString(node, "${" + ex.toString() + "}");
                 return wrapInMatch(e, destType, wrapper);
             } else {
                 throw new TranslationException("Unsupported cast to string", node);
             }
         } else if (destType.is(DDlogTFloat.class) || destType.is(DDlogTDouble.class)) {
             IsNumericType num = destType.toNumeric();
-            if (eType.is(DDlogTString.class)) {
+            if (eType.is(DDlogTIString.class)) {
                 String suffix = eType.is(DDlogTFloat.class) ? "f" : "d";
                 // I am lying here, the result is actually Result<>,
                 // but the unwrap below will remove it.
                 Function<DDlogExpression, DDlogExpression> wrapper = ex -> {
                     DDlogExpression parse = new DDlogEApply(node,
-                            "parse_" + suffix, destType.setMayBeNull(true), ex);
+                            "parse_" + suffix, destType.setMayBeNull(true), DDlogTIString.ival(ex));
                     return new DDlogEApply(node,
                             "result_unwrap_or_default", destType, parse);
                 };
@@ -192,6 +193,14 @@ public class ExpressionTranslationVisitor extends AstVisitor<DDlogExpression, Tr
                             "option_unwrap_or_default", destType, parse);
                 };
                 return wrapInMatch(e, destType, wrapper);
+            } else if (eType.is(DDlogTIString.class)) {
+                Function<DDlogExpression, DDlogExpression> wrapper = ex -> {
+                    DDlogExpression parse = new DDlogEApply(node,
+                            "parse_dec_i64", DDlogTSigned.signed64.setMayBeNull(true), DDlogTIString.ival(ex));
+                    return new DDlogEApply(node,
+                            "option_unwrap_or_default", destType, parse);
+                };
+                return wrapInMatch(e, destType, wrapper);
             } else if (eType.is(DDlogTBool.class)) {
                 Function<DDlogExpression, DDlogExpression> wrapper = ex -> new DDlogEITE(node, ex, num.one(), num.zero());
                 return wrapInMatch(e, destType, wrapper);
@@ -215,10 +224,11 @@ public class ExpressionTranslationVisitor extends AstVisitor<DDlogExpression, Tr
                 DDlogType exType = ex.getType();
                 // At least in MySQL integers are converted to dates as if they were strings...
                 if (exType.is(DDlogTInt.class) || exType.is(DDlogTSigned.class) || exType.is(DDlogTBit.class)) {
-                    ex = new DDlogEString(node, "${" + e.toString() + "}");
+                    ex = new DDlogEIString(node, "${" + e.toString() + "}");
                     exType = ex.getType();
                 }
-                if (exType.is(DDlogTString.class)) {
+                if (exType.is(DDlogTIString.class)) {
+                    ex = DDlogTIString.ival(ex);
                     String parseFunc;
                     switch (tu.getName()) {
                         case "Date":
@@ -510,12 +520,12 @@ public class ExpressionTranslationVisitor extends AstVisitor<DDlogExpression, Tr
                 return DDlogTSigned.signed64.setMayBeNull(args.get(0).getType().mayBeNull);
             case "concat":
                 boolean mayBeNull = Linq.any(args, a -> a.getType().mayBeNull);
-                return DDlogTString.instance.setMayBeNull(mayBeNull);
+                return DDlogTIString.instance.setMayBeNull(mayBeNull);
             case "array_agg":
                 if (args.size() != 1)
                     throw new TranslationException("Expected exactly 1 argument for aggregate", node);
                 DDlogExpression arg = args.get(0);
-                return new DDlogTArray(node, arg.getType(), false);
+                return new DDlogTRef(node, new DDlogTArray(node, arg.getType(), false), false);
             case "array_contains":
                 return DDlogTBool.instance;
             default:
@@ -553,33 +563,41 @@ public class ExpressionTranslationVisitor extends AstVisitor<DDlogExpression, Tr
         */
         String name = functionName(node);
         List<Expression> arguments = node.getArguments();
-        if (name.toLowerCase().equals("concat")) {
+        if (name.equalsIgnoreCase("concat")) {
             // Cast each argument to a string
             arguments = Linq.map(arguments, a -> new Cast(a, "varchar"));
         }
         List<DDlogExpression> args = Linq.map(arguments, a -> this.process(a, context));
         DDlogType type = functionResultType(node, name, args);
-        boolean someNull = Linq.any(args, a -> a.getType().mayBeNull);
         String useName = "sql_" + name;
-        if (name.equals("array_contains")) {
-            if (args.get(0).getType() instanceof DDlogTArray) {
-                // Now check the subtype
-                DDlogTArray ary = (DDlogTArray) args.get(0).getType();
-                if (ary.getElemType().mayBeNull) {
+        if (name.equalsIgnoreCase("array_contains")) {
+            if (args.size() != 2)
+                throw new TranslationException("Expected 2 arguments for 'array_contains', got " + args.size(), node);
+            DDlogExpression array = args.get(0);
+            DDlogExpression element = args.get(1);
+            DDlogType arrayElemType = array.getType().to(DDlogTRef.class).elemType.to(DDlogTArray.class).elemType;
+            DDlogType elemType = element.getType();
+            if (elemType.mayBeNull) {
+                if (!arrayElemType.mayBeNull)
                     useName += "_N";
+            } else {
+                if (arrayElemType.mayBeNull) {
+                    element = wrapSomeIfNeeded(element, arrayElemType);
+                    args.set(1, element);
                 }
             }
         } else {
+            boolean someNull = Linq.any(args, a -> a.getType().mayBeNull);
             if (someNull)
                 useName += "_N";
-        }
-        if (varargs.contains(name)) {
-            if (arguments.size() == 0)
-                throw new TranslationException("Function does not have arguments", node);
-            DDlogExpression result = args.get(0);
-            for (int i = 1; i < args.size(); i++)
-                result = new DDlogEApply(node, useName, type, result, args.get(i));
-            return result;
+            if (varargs.contains(name)) {
+                if (arguments.size() == 0)
+                    throw new TranslationException("Function does not have arguments", node);
+                DDlogExpression result = args.get(0);
+                for (int i = 1; i < args.size(); i++)
+                    result = new DDlogEApply(node, useName, type, result, args.get(i));
+                return result;
+            }
         }
         return new DDlogEApply(node, useName, type, args.toArray(new DDlogExpression[0]));
     }
@@ -731,6 +749,6 @@ public class ExpressionTranslationVisitor extends AstVisitor<DDlogExpression, Tr
     @Override
     protected DDlogExpression visitStringLiteral(StringLiteral node, TranslationContext context) {
         String s = formatStringLiteral(node.getValue());
-        return new DDlogEString(node, s);
+        return new DDlogEIString(node, s);
     }
 }
