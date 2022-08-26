@@ -995,6 +995,10 @@ public class DDlogAPI {
         command.add("-L" + rustDir + "/target/release/");
         String libRoot = Paths.get(rustDir).getFileName().toString();
         command.add("-l" + libRoot);
+        if (os.equals("mac os x")) {
+           command.add("-framework");
+           command.add("CoreFoundation");
+        }
         command.add("-o");
         command.add(outLibName);
         runProcess(command, null, result);
